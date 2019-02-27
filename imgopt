@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+
+VERSION='1.0.0'
+
+warn()
+{
+    if [ -z "$quiet" ]; then
+        (>&2 echo -e "\e[1;38;05;9m$1\e[m")
+    fi
+}
+
+log()
+{
+    if [ ! -z "$logFile" ]; then
+        time=$(date '+%Y-%m-%d %H:%M:%S')
+        echo -e "[$time]\t$1" >> $logFile
+    fi
+}
+
+out()
+{
+    if [ -z "$quiet" ]; then
+        echo "$1"
+    fi
+}
+
+throw()
+{
+    warn "$1"
+    exit 1
+}
+
+printUsage()
+{
+    local SCRIPT_NAME=$(basename $0)
+    echo "${SCRIPT_NAME} ${VERSION}"
+    echo "Usage: ${SCRIPT_NAME} [OPTIONS] directory"
+    echo "Options:"
+    echo "    -h | --help                display this message and exit"
+    echo "    -q | --quiet               no output"
+    echo "    -v | --version             display script version and exit"
+    echo "    -y                         assume yes"
+    echo
+}
+
+optimize()
+{
+    local file="$1"
+    local error=""
+    extension="${file##*.}"
+    case $extension in
+        png|PNG)
+            error=$(oxipng -q -o 4 --strip safe "$file" 2>&1 >/dev/null)
+            ;;
+        jpg|JPG)
+            error=$(jpegtran -copy none -optimize -progressive -outfile "$file" "$file" 2>&1 >/dev/null)
+            ;;
+        *)
+            error="Unsupported file type: $file"
+            ;;
+    esac
+    if [ ! -z "$error" ]; then
+        warn "$error: $file"
+        log "$error: $file"
+    fi
+}
+
+displaytime()
+{
+    local t=$1
+    local d=$((t/60/60/24))
+    local h=$((t/60/60))
+    local m=$((t/60%60))
+    local s=$((t%60))
+
+    printf "%02d:%02d:%02d" $h $m $s
+}
+
+progress()
+{
+    local interval=1
+    time=$(date +%s)
+    timeDiff=$(($time - $lastTime))
+    if [ "$timeDiff" -gt "$interval" ] || [ "$count" = "$total" ]; then
+        percent=$(($count * 100 / $total))
+        duration=$(($time - $start))
+        left=$(($total * $duration / $count - $duration))
+        eta=$(($left + $duration))
+        echo -ne "\e[1;38;05;15mProgress:\e[m $percent% [$count/$total] "
+        echo -ne "\e[1;38;05;15mElapsed/Left/Estimated Time:\e[m [$(displaytime "$duration") / $(displaytime "$left") / $(displaytime "$eta")]\r"
+        if [ "$count" = "$total" ]; then
+            echo
+        fi
+        lastTime="$time"
+    fi
+}
+
+if [ $# -eq 0 ]
+then
+    printUsage
+    exit 0;
+fi
+
+subdir=""
+
+POSITIONAL=()
+while [[ $# -gt 0 ]]
+do
+    key="$1"
+    case $key in
+        -v|--verbose)
+            verbose="v"
+            shift
+            ;;
+        -vv)
+            verbose="vv"
+            shift
+            ;;
+        -vvv)
+            verbose="vvv"
+            shift
+            ;;
+        -q|--quiet)
+            quiet="1"
+            shift
+            ;;
+        -h|--help)
+            helpPage
+            exit 0
+            ;;
+        -s|--subdir)
+            subdir="$2"
+            shift
+            shift
+            ;;
+        -l|--log)
+            logFile="$2"
+            shift
+            shift
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${POSITIONAL[@]}"
+
+if [ $# -ne 1 ]
+then
+    warn "Too many arguments"
+    printUsage
+    exit 1;
+fi
+
+directory=$1
+
+if [ ! -d "$directory" ] ; then
+    throw "Directory not found: $directory"
+fi
+
+if [ ! -z "$subdir" ] ; then
+    dirs=$(find $directory -type d -name "$subdir")
+else
+    dirs="$directory"
+fi
+
+findOptions=()
+if [ ! -z "$logFile" ] && [ -f "$logFile" ]; then
+    findOptions+=("-newer" "$logFile")
+fi
+
+start=$(date +%s)
+lastTime="$start"
+total=0
+for dir in $dirs; do
+    count=$(find $dir \( -iname '*.png' -o -iname '*.jpg' \) "${findOptions[@]}" | wc -l)
+    total=$(($total + $count))
+done
+
+if [ "$total" -eq "0" ]; then
+    exit 0;
+fi
+
+log "Found $total images for optimization"
+count=0
+for dir in $dirs; do
+    if [[ "$verbose" = "vvv" ]]; then
+        echo "CMD: find $dir \( -iname '*.png' -o -iname '*.jpg' \) ${findOptions[@]}"
+    fi
+    files=$(find $dir \( -iname '*.png' -o -iname '*.jpg' \) "${findOptions[@]}")
+    if [ -z "$files" ]; then
+        continue
+    fi
+    for file in $files; do
+        count=$(($count + 1))
+        optimize "$file"
+        if [ -z "$quiet" ]; then
+#            sleep 1
+            progress
+        fi
+    done
+done
+log "Optimization completed"
